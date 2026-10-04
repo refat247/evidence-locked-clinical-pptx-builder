@@ -1,0 +1,94 @@
+name: One-shot canonical import
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/import-canonical.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Fetch frozen monorepo source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --quiet https://github.com/refat247/medical-cdss-skills.git /tmp/medical-cdss-skills
+          git -C /tmp/medical-cdss-skills checkout --quiet --detach 39ff2fa03aede6b0c39988e900e63d3bc70b1342
+          test "$(git -C /tmp/medical-cdss-skills rev-parse HEAD)" = "39ff2fa03aede6b0c39988e900e63d3bc70b1342"
+          test -d /tmp/medical-cdss-skills/evidence-locked-clinical-pptx-builder
+
+      - name: Replace bootstrap with canonical subtree
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=/tmp/medical-cdss-skills/evidence-locked-clinical-pptx-builder
+          find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+          cp -a "$SOURCE"/. .
+          cat > MIGRATION_PROVENANCE.md <<'EOF'
+          # Migration Provenance
+
+          This repository became the canonical home of `evidence-locked-clinical-pptx-builder` on 2026-10-04.
+
+          - Source repository: `refat247/medical-cdss-skills`
+          - Frozen source commit: `39ff2fa03aede6b0c39988e900e63d3bc70b1342`
+          - Source path: `evidence-locked-clinical-pptx-builder/`
+          - Source subtree Git tree: `0cca38776383597314b6a8789014e7e76fa66cf6`
+          - Migration method: one-shot target-repository GitHub Actions copy from the frozen public source commit
+          - Integrity gate: byte-for-byte directory comparison plus SHA-256 verification of every entry declared in `PACKAGE_MANIFEST.md`
+
+          The source monorepo is retained only as historical provenance after cutover; this repository is the writable canonical source after the monorepo migration pointer is merged.
+          EOF
+
+      - name: Verify byte identity and package manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          SOURCE=/tmp/medical-cdss-skills/evidence-locked-clinical-pptx-builder
+          diff -qr "$SOURCE" . --exclude='.git' --exclude='MIGRATION_PROVENANCE.md'
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, re, sys
+
+          root = Path('.')
+          manifest = (root / 'PACKAGE_MANIFEST.md').read_text(encoding='utf-8')
+          rows = re.findall(r'^\| `([^`]+)` \| (\d+) \| `([0-9a-f]{64})` \|$', manifest, re.M)
+          if not rows:
+              raise SystemExit('No manifest rows parsed')
+          failures = []
+          for rel, expected_size, expected_sha in rows:
+              p = root / rel
+              if not p.is_file():
+                  failures.append(f'MISSING {rel}')
+                  continue
+              data = p.read_bytes()
+              actual_size = len(data)
+              actual_sha = hashlib.sha256(data).hexdigest()
+              if actual_size != int(expected_size):
+                  failures.append(f'SIZE {rel}: {actual_size} != {expected_size}')
+              if actual_sha != expected_sha:
+                  failures.append(f'SHA256 {rel}: {actual_sha} != {expected_sha}')
+          print(f'Verified {len(rows)} manifest entries')
+          if failures:
+              print('\n'.join(failures), file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+      - name: Commit canonical import
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'Import canonical evidence-locked clinical PPTX builder'
+          git push origin HEAD:main
